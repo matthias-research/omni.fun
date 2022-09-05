@@ -10,7 +10,7 @@ import math
 import warp as wp
 
 from pxr import Usd, UsdGeom, Gf, Sdf
-from gpu import *
+from .gpu import *
 
 
 class Sim():

@@ -6,13 +6,14 @@ from pxr import Usd, Sdf
 import time
 
 class ControlsWindow:
-    def __init__(self, init_func, rest_func):
+    def __init__(self, init_func, reset_func):
         self._window = None
         self.init_func = init_func
-        self.reset_func = rest_func
+        self.reset_func = reset_func
         self.paused = True
         self.gravity = 10.0
         self.selected_prim = None
+        self.init_button = None
         
 
     def __bool__(self):
@@ -29,6 +30,9 @@ class ControlsWindow:
     def show_window(self):
         self._window.visible = True
 
+    def hide_window(self):
+        self._window.visible = False
+
 
     def destroy_window(self):
         if self._window:
@@ -42,16 +46,16 @@ class ControlsWindow:
 
 
     def set_selected_prim(self, prim):
-        self._selected_prim = prim
+        self.selected_prim = prim
         
 
-    def init_pressed(self, button):
-        if button.text == "Init":
+    def init_pressed(self):
+        if self.init_button.text == "Init":
             if self.init_func:
                 self.init_func()
-            button.text = "Reset"
+            self.init_button.text = "Reset"
         else:
-            button.text = "Init"
+            self.init_button.text = "Init"
             if self.reset_func:
                 self.reset_func()
 
@@ -71,14 +75,14 @@ class ControlsWindow:
             with self._window.frame:
                 with ui.VStack(spacing=v_spacing, padding=50):
                     with ui.HStack(spacing=h_spacing, height=row_height):
-                        init_button = ui.Button("Init", width=100, height=15, margin=10, clicked_fn=lambda b=init_button, self.init_pressed(b)))
+                        self.init_button = ui.Button("Init", width=100, height=15, margin=10, clicked_fn=self.init_pressed)
 
-                    if  self._selected_prim:
-                        prim = self._selected_prim
+                    if  self.selected_prim:
+                        prim = self.selected_prim
 
                         with ui.HStack(spacing=h_spacing, height=row_height):
                             ui.Label("Object path", width=100,padding=10)
-                            ui.Label(str(self._selected_prim.GetPath()), width=100)
+                            ui.Label(str(self.selected_prim.GetPath()), width=100)
                         
                         with ui.HStack(spacing=h_spacing, height=row_height):
                             ui.Label("Parameters:")
@@ -91,7 +95,8 @@ class ControlsWindow:
 
                                     with ui.HStack(spacing=h_spacing, height=row_height):
                                         ui.Label("Gravity", width=ui.Percent(50), height=10, name="Gravity")
-                                        slider = ui.FloatSlider(min=0.0,max=10.0, width=ui.Percent(50))                                        slider.model.add_value_changed_fn(lambda val, param_name="gravity": self.set_parameter(param_name, val.get_value_as_float()))
+                                        slider = ui.FloatSlider(min=0.0,max=10.0, width=ui.Percent(50))                                        
+                                        slider.model.add_value_changed_fn(lambda val, param_name="gravity": self.set_parameter(param_name, val.get_value_as_float()))
 
                     else:
                         with ui.HStack(spacing=5, height=row_height):

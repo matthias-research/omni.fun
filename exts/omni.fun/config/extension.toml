@@ -31,6 +31,6 @@ name = "omni.fun"
 
 # Core language module
 [[python.module]]
-name = "fun"
+name = "omni.fun"
 path = "."
 public = true
