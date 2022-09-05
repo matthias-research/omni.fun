@@ -6,14 +6,18 @@ from pxr import Usd, Sdf
 import time
 
 class ControlsWindow:
-    def __init__(self):
+    def __init__(self, init_func, rest_func):
         self._window = None
+        self.init_func = init_func
+        self.reset_func = rest_func
         self.paused = True
         self.gravity = 10.0
         self.selected_prim = None
         
+
     def __bool__(self):
         return self._window is not None
+
 
     def create_window(self, visibility_changed_fn):
         window_flags = omni.ui.WINDOW_FLAGS_NO_SCROLLBAR
@@ -21,14 +25,17 @@ class ControlsWindow:
         self._window.set_visibility_changed_fn(visibility_changed_fn)
         self.build_ui()
 
+
     def show_window(self):
         self._window.visible = True
+
 
     def destroy_window(self):
         if self._window:
             self._window.visible = False
             self._window.destroy()
             self._window = None
+
 
     def on_shutdown(self):
         self.destroy_window()
@@ -38,8 +45,15 @@ class ControlsWindow:
         self._selected_prim = prim
         
 
-    def start_stop_pressed(self):
-        self.paused = not self.paused
+    def init_pressed(self, button):
+        if button.text == "Init":
+            if self.init_func:
+                self.init_func()
+            button.text = "Reset"
+        else:
+            button.text = "Init"
+            if self.reset_func:
+                self.reset_func()
 
 
     def set_parameter(self, param_name, val):
@@ -57,7 +71,7 @@ class ControlsWindow:
             with self._window.frame:
                 with ui.VStack(spacing=v_spacing, padding=50):
                     with ui.HStack(spacing=h_spacing, height=row_height):
-                        self.init_button = ui.Button("Start", width=100, height=15, margin=10, clicked_fn=self.init_pressed)
+                        init_button = ui.Button("Init", width=100, height=15, margin=10, clicked_fn=lambda b=init_button, self.init_pressed(b)))
 
                     if  self._selected_prim:
                         prim = self._selected_prim

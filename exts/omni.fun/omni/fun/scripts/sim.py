@@ -22,17 +22,24 @@ class Sim():
         self.collision_mesh = None
         self.spheres = []
 
-        self.dev_data = DeviceData
-        self.host_pos = None
+        self.dev_data = SimData
+        self.host_data = SimData
+        self.initialized = False
 
         self.time_step = 1.0 / 30.0
         self.num_substeps = 5
         self.gravity = wp.vec3(0.0, 0.0, -self.controls.gravity)
+        self.jacobi_scale = 0.25
+
+        self.selected_sphere = -1
+        self.selected_inv_mass = 0.0
+        self.paused = True
 
 
     class Sphere():
 
         def __init__(self, prim):
+            self.prim = prim
             self.xform_op = None
             self.radius = 0.0
             self.pos = wp.vec3(0.0, 0.0, 0.0)
@@ -51,6 +58,11 @@ class Sim():
                             pos = self.xform_op.Get()
                             self.pos = wp.vec3(pos[0], pos[1], pos[2])
 
+        def get_position(self):
+            if self.xform_op:
+                pos = self.xform_op.Get()
+                return wp.vec3(pos[0], pos[1], pos[2])
+            
         def set_position(self, pos: wp.vec3):
             self.pos = pos
             if self.xform_op:
@@ -67,7 +79,7 @@ class Sim():
         self.spheres = []
         spheres_pos = []
         spheres_radius = []
-        spheres_mass = []
+        spheres_inv_mass = []
 
         for prim in self.stage.Traverse():
             if prim.GetTypeName() == "Sphere":
@@ -76,7 +88,8 @@ class Sim():
                 spheres_pos.append(sphere.pos)
                 r = sphere.radius
                 spheres_radius.append(r)
-                spheres_mass.append(4.0 * math.pi / 3.0 * r*r*r)
+                m = 4.0 * math.pi / 3.0 * r*r*r
+                spheres_inv_mass.append(1.0 / m)
 
         num_spheres = len(self.spheres)
 
@@ -119,45 +132,83 @@ class Sim():
             self.dev_data.spheres_prev_pos = wp.array(verts, dtype=wp.vec3, device=self.device)
             self.dev_data.spheres_prev_pos = wp.zeros(shape=(num_spheres), dtype=wp.vec3, device=self.device)
             self.dev_data.spheres_vel: wp.zeros(shape=(num_spheres), dtype=wp.vec3, device=self.device)            
-            self.dev_data.spheres_radius: wp.array(spheres_radius, dtype=float)
-            self.dev_data.spheres_mass: wp.array(spheres_mass, dtype=float)
+            self.dev_data.spheres_radius: wp.array(spheres_radius, dtype=float, device=self.device)
+            self.dev_data.spheres_inv_mass: wp.array(spheres_inv_mass, dtype=float, device=self.device)
 
             dev_verts = wp.array(verts, dtype = wp.vec3, device=self.device)
             dev_tri_ids = wp.array(tri_ids, dtype = int, device=self.device)
             dev_mesh = wp.Mesh(dev_verts, dev_tri_ids)
             self.dev_data.mesh_id = dev_mesh.id
 
-            self.host_pos = wp.array(spheres_pos, dtype=wp.vec3, device="cpu")
+            self.host_data.spheres_pos = wp.array(spheres_pos, dtype=wp.vec3, device="cpu")
+            self.host_data.spheres_inv_mass: wp.array(self.spheres_inv_mass, dtype=float, device="cpu")
+        
+        self.initialized = True
+        self.paused = False
 
 
     def update(self):
 
-        if not self.stage:
+        if not self.stage or not self.initialized or self.paused:
             return
             
         num_spheres = len(self.spheres)    
         if num_spheres == 0:
             return
 
+        if self.controls:
+            self.controls.selected_prim
+
         dt = self.time_step / self.num_substeps
 
-        # send positions to gpu
+        # send updates to device
 
-        
+        np_inv_mass = self.host_data.spheres_inv_mass.numpy()
+        np_pos = self.host_data.spheres_pos.numpy()
+
+        if self.selected_sphere >= 0:
+            np_inv_mass[self.selected_sphere] = self.selected_inv_mass
+            self.selected_sphere = -1
+
+        if self.controls:
+            self.gravity = wp.vec3(0.0, 0.0, self.controls.gravity)
+            for i in range(num_spheres):
+                if self.spheres[i].prim == self.controls.selected_prim:
+                    self.selected_inv_mass = np_inv_mass[i]
+                    np_inv_mass[i] = 0.0
+                    np_pos[i] = self.spheres[i].get_position()
+
+        wp.copy(self.dev_data.spheres_inv_mass, self.host_data.spheres_inv_mass)
+        wp.copy(self.dev_data.spheres_pos, self.host_data.spheres_pos)
 
         # simulate
 
         for i in range(self.num_substeps):
 
             integrate_spheres(num_spheres, dt, self.gravity, self.dev_data, self.device)
-            solve_spheres_collisions(num_spheres, self.dev_data)
-            update_spheres(num_spheres, dt, self.dev_data, self.device)
 
-        # read back pos
+            solve_mesh_collisions(num_spheres, self.dev_data)
+            solve_sphere_collisions(num_spheres, self.dev_data, self.device)
 
-        wp.copy(self.host_pos, self.dev_data.sphere_pos)
-        np_pos = self.host_pos.numpy()
+            update_spheres(num_spheres, dt, self.jacobi_scale, self.dev_data, self.device)
+
+        # read data from device
+
+        wp.copy(self.host_data.spheres_pos, self.dev_data.spheres_pos)
+        np_pos = self.host_data.spheres_pos.numpy()
 
         for i in range(num_spheres):
-            self.spheres[i].set_position(np_pos[i])
+            if self.spheres[i].prim != self.controls.selected_prim:
+                self.spheres[i].set_position(np_pos[i])
+
+
+    def reset(self):
+
+        for sphere in self.spheres:
+            sphere.set_position(sphere.pos)
+
+        self.paused = True
+
+
+
 

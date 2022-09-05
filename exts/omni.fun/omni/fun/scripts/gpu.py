@@ -10,12 +10,13 @@ import warp as wp
 
 
 @wp.struct
-class DeviceData:
+class SimData:
     spheres_pos: wp.array(dtype=wp.vec3)
     spheres_prev_pos: wp.array(dtype=wp.vec3)
+    spheres_pos_corr: wp.array(dtype=wp.vec3)
     spheres_vel: wp.array(dtype=wp.vec3)
     spheres_radius: wp.array(dtype=float)
-    spheres_mass: wp.array(dtype=float)
+    spheres_inv_mass: wp.array(dtype=float)
     mesh_id: wp.uint64
     mesh_verts: wp.array(dtype=wp.vec3)
     mesh_tri_ids: wp.array(dtype=int)
@@ -69,15 +70,17 @@ def closest_point_on_triangle(
 def dev_integrate_spheres(
     dt: float,
     gravity: wp.vec3,
-    data: DeviceData):
+    data: SimData):
 
     sphere_nr = wp.tid()
-    data.spheres_vel[sphere_nr] += gravity * dt
-    data.spheres_prev_pos[sphere_nr] = data.spheres_pos[sphere_nr]
-    data.spheres_pos[sphere_nr] += data.spheres_vel[sphere_nr] * dt
+    w = data.spheres_inv_mass[sphere_nr]
+    if w > 0.0:
+        data.spheres_vel[sphere_nr] += gravity * dt
+        data.spheres_prev_pos[sphere_nr] = data.spheres_pos[sphere_nr]
+        data.spheres_pos[sphere_nr] += data.spheres_vel[sphere_nr] * dt
 
 
-def integrate_spheres(num_spheres: int, dt: float, gravity: wp.vec3, data: DeviceData, device):
+def integrate_spheres(num_spheres: int, dt: float, gravity: wp.vec3, data: SimData, device):
     wp.launch(kernel = dev_integrate_spheres, 
                 inputs = [dt, gravity, data], dim=num_spheres, device=device)
 
@@ -85,55 +88,94 @@ def integrate_spheres(num_spheres: int, dt: float, gravity: wp.vec3, data: Devic
 @wp.kernel
 def dev_update_spheres(
     dt: float,
-    data: DeviceData):
+    jacobi_scale: float, 
+    data: SimData):
 
     sphere_nr = wp.tid()
-    data.spheres_vel[sphere_nr] = (data.spheres_pos[sphere_nr] - data.spheres_prev_pos[sphere_nr]) / dt
+    w = data.spheres_inv_mass[sphere_nr]
+    if w > 0.0:
+        data.spheres_pos[sphere_nr] = data.spheres_pos[sphere_nr] + jacobi_scale * data.spheres_pos_corr
+        data.spheres_vel[sphere_nr] = (data.spheres_pos[sphere_nr] - data.spheres_prev_pos[sphere_nr]) / dt
 
 
-def update_spheres(num_spheres: int, dt: float, data: DeviceData, device):
+def update_spheres(num_spheres: int, dt: float, jacobi_scale: float, data: SimData, device):
     wp.launch(kernel = dev_update_spheres, 
-                inputs = [dt, data], dim=num_spheres, device=device)
+                inputs = [dt, jacobi_scale, data], dim=num_spheres, device=device)
 
 
 @wp.kernel
-def dev_solve_spheres_collisions(
-        data: DeviceData):
+def dev_solve_mesh_collisions(
+        data: SimData):
     
     sphere_nr = wp.tid()
-    pos = data.spheres_pos[sphere_nr]
-    vel = data.spheres_vel[sphere_nr]
-    r = data.spheres_radius[sphere_nr]
+    w = data.spheres_inv_mass[sphere_nr]
+    if w > 0.0:
+        pos = data.spheres_pos[sphere_nr]
+        r = data.spheres_radius[sphere_nr]
 
-    # query bounding volume hierarchy
+        # query bounding volume hierarchy
 
-    bounds_lower = pos - wp.vec3(r, r, r)
-    bounds_upper = pos + wp.vec3(r, r, r)
+        bounds_lower = pos - wp.vec3(r, r, r)
+        bounds_upper = pos + wp.vec3(r, r, r)
 
-    query = wp.mesh_query_aabb(data.mesh_id, bounds_lower, bounds_upper)
-    tri_nr = int(0)
+        query = wp.mesh_query_aabb(data.mesh_id, bounds_lower, bounds_upper)
+        tri_nr = int(0)
 
-    while (wp.mesh_query_aabb_next(query, tri_nr)):
+        while (wp.mesh_query_aabb_next(query, tri_nr)):
+                
+            p0 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr]]
+            p1 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr + 1]]
+            p2 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr + 2]]
+
+            hit = closest_point_on_triangle(pos, p0, p1, p2)
+
+            n = pos - hit                
+            d = wp.length(n)
+            if d < r:
+                n = wp.normalize(n)
+                data.spheres_pos[sphere_nr] = data.spheres_pos[sphere_nr] + n * (r - d)
+
             
-        p0 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr]]
-        p1 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr + 1]]
-        p2 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr + 2]]
-
-        hit = closest_point_on_triangle(pos, p0, p1, p2)
-
-        n = pos - hit                
-        d = wp.length(n)
-        if d < r:
-            n = wp.normalize(n)
-            data.spheres_pos[sphere_nr] = data.spheres_pos[sphere_nr] + n * (r - d)
-
-            
-def solve_spheres_collisions(num_spheres: int, data: DeviceData, device):
-    wp.launch(kernel = dev_solve_spheres_collisions, 
+def solve_mesh_collisions(num_spheres: int, data: SimData, device):
+    wp.launch(kernel = dev_solve_mesh_collisions, 
                 inputs = [data], dim=num_spheres, device=device)
+
+            
+@wp.kernel
+def dev_solve_sphere_collisions(
+        num_spheres: int,
+        data: SimData):
+    
+    i0 = wp.tid()
+    p0 = data.spheres_pos[i0]
+    r0 = data.spheres_radius[i0]
+    w0 = data.spheres_inv_mass[i0]
+
+    # simpe O(n^2) collision detection
+
+    for i1 in range(num_spheres):
+        if i1 > i0:
+
+            p1 = data.spheres_pos[i1]
+            r1 = data.spheres_radius[i1]
+            w1 = data.spheres_inv_mass[i1]
+            w = w0 + w1
+
+            if w > 0.0:
+                n = p1 - p0
+                d = wp.length(n)
+                n = wp.noramlize(n)
+
+                if d < r0 + r1:
+                    corr = n * (r0 + r1 - d) / w
+                    data.spheres_corr[i0] = data.spheres_corr[i0] - corr * w0
+                    data.spheres_corr[i1] = data.spheres_corr[i1] - corr * w0
+
+            
+def solve_sphere_collisions(num_spheres: int, data: SimData, device):
+    wp.launch(kernel = dev_solve_sphere_collisions, 
+                inputs = [num_spheres, data], dim=num_spheres, device=device)
 
             
 
         
-
-

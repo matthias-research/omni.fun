@@ -11,8 +11,10 @@ import omni.usd
 from omni import ui
 from pxr import Usd
 import sim
+from .controls import ControlsWindow
 
 EXAMPLES_PATH = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../data/scenes"))
+
 
 class OmniPlayExtension(omni.ext.IExt):
 
@@ -23,21 +25,26 @@ class OmniPlayExtension(omni.ext.IExt):
 
         if editor_menu:
 
-            self.menu_items.append(editor_menu.add_item(
-                f"Window/Fun/Start", 
-                lambda _, value: self.start(),
-                toggle=False, value=False
-            ))
+            self.controls_menu = editor_menu.add_item(
+                f"Window/Fun/Controls", 
+                lambda _, value: self.show_controls(value), 
+                toggle=True, value=False
+            )            
+
             self.menu_items.append(editor_menu.add_item(
                 f"Window/Fun/Basics example", 
                 lambda _, value: self.load_example("basics.usd"),
                 toggle=False, value=False
             ))
 
-        self.sim = None
+        stage = omni.usd.get_context().get_stage()
+        self.sim = sim.Sim(stage)
+
+        self.show_controls(True)
  
         # set callbacks
 
+        self.update_event_sub = self.update_event_stream.create_subscription_to_pop(self.on_update)
         self.update_event_stream = omni.kit.app.get_app_interface().get_update_event_stream()
         self.stage_event_sub = omni.usd.get_context().get_stage_event_stream().create_subscription_to_pop(self.on_event)
 
@@ -50,17 +57,42 @@ class OmniPlayExtension(omni.ext.IExt):
         self.sim = None
 
 
+    def set_controls_menu(self, visible):
+        omni.kit.ui.get_editor_menu().set_value(f"Window/Fun/Controls", visible)
+
+
+    def show_controls(self, is_visible):
+        if is_visible: 
+            if self.controls is None:
+                self.controls = ControlsWindow(
+                    init_func = self.init_sim,
+                    reset_func = self.reset_sim)
+                self.controls.create_window(lambda visible: self.set_controls_menu(visible))
+                self.controls.show_window()
+            else:
+                self.controls.show_window()
+        elif self.controls:
+            self.controls.destroy_window()
+            self.controls = None
+
+
     def init_sim(self):
 
-        stage = omni.usd.get_context().get_stage()
-        self.sim = sim.Sim(stage)
-        self.update_event_sub = self.update_event_stream.create_subscription_to_pop(self.on_update)
+        if self.sim:
+            self.sim.init()
 
+
+    def reset_sim(self):
+
+        if self.sim:
+            self.sim.reset()
+        
 
     def on_update(self, event):
 
         if self.sim:
-            self.sim.on_update()
+            self.sim.update()
+
 
     def on_event(self, event):
 
