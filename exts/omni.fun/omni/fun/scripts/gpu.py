@@ -10,11 +10,12 @@ import warp as wp
 
 
 @wp.struct
-class GpuData:
-    sphere_pos: wp.array(dtype=wp.vec3)
-    sphere_vel: wp.array(dtype=wp.vec3)
-    sphere_radius: wp.array(dtype=float)
-    sphere_mass: wp.array(dtype=float)
+class DeviceData:
+    spheres_pos: wp.array(dtype=wp.vec3)
+    spheres_prev_pos: wp.array(dtype=wp.vec3)
+    spheres_vel: wp.array(dtype=wp.vec3)
+    spheres_radius: wp.array(dtype=float)
+    spheres_mass: wp.array(dtype=float)
     mesh_id: wp.uint64
     mesh_verts: wp.array(dtype=wp.vec3)
     mesh_tri_ids: wp.array(dtype=int)
@@ -65,40 +66,71 @@ def closest_point_on_triangle(
 
 
 @wp.kernel
-def solve_collisions(
-        dt: float,
-        num_spheres: int,
-        data: GpuData):
+def dev_integrate_spheres(
+    dt: float,
+    gravity: wp.vec3,
+    data: DeviceData):
+
+    sphere_nr = wp.tid()
+    data.spheres_vel[sphere_nr] += gravity * dt
+    data.spheres_prev_pos[sphere_nr] = data.spheres_pos[sphere_nr]
+    data.spheres_pos[sphere_nr] += data.spheres_vel[sphere_nr] * dt
+
+
+def integrate_spheres(num_spheres: int, dt: float, gravity: wp.vec3, data: DeviceData, device):
+    wp.launch(kernel = dev_integrate_spheres, 
+                inputs = [dt, gravity, data], dim=num_spheres, device=device)
+
+
+@wp.kernel
+def dev_update_spheres(
+    dt: float,
+    data: DeviceData):
+
+    sphere_nr = wp.tid()
+    data.spheres_vel[sphere_nr] = (data.spheres_pos[sphere_nr] - data.spheres_prev_pos[sphere_nr]) / dt
+
+
+def update_spheres(num_spheres: int, dt: float, data: DeviceData, device):
+    wp.launch(kernel = dev_update_spheres, 
+                inputs = [dt, data], dim=num_spheres, device=device)
+
+
+@wp.kernel
+def dev_solve_spheres_collisions(
+        data: DeviceData):
     
     sphere_nr = wp.tid()
-    pos = data.sphere_pos[sphere_nr]
-    r = data.sphere_radius[sphere_nr]
+    pos = data.spheres_pos[sphere_nr]
+    vel = data.spheres_vel[sphere_nr]
+    r = data.spheres_radius[sphere_nr]
 
-    # bounds for overlap test with bounding volume hierarchy
+    # query bounding volume hierarchy
 
     bounds_lower = pos - wp.vec3(r, r, r)
     bounds_upper = pos + wp.vec3(r, r, r)
-
-    # query
 
     query = wp.mesh_query_aabb(data.mesh_id, bounds_lower, bounds_upper)
     tri_nr = int(0)
 
     while (wp.mesh_query_aabb_next(query, tri_nr)):
+            
+        p0 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr]]
+        p1 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr + 1]]
+        p2 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr + 2]]
 
-        if tri_nr < num_spheres:
-            # sphere - sphere collision
-            pass
+        hit = closest_point_on_triangle(pos, p0, p1, p2)
 
-        else:
-            # sphere - triangle collision
-            tri_nr = tri_nr - num_spheres
-                
-            p0 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr]]
-            p1 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr + 1]]
-            p2 = data.mesh_verts[data.mesh_tri_ids[3*tri_nr + 2]]
+        n = pos - hit                
+        d = wp.length(n)
+        if d < r:
+            n = wp.normalize(n)
+            data.spheres_pos[sphere_nr] = data.spheres_pos[sphere_nr] + n * (r - d)
 
-            hit = closest_point_on_triangle(pos, p0, p1, p2)
+            
+def solve_spheres_collisions(num_spheres: int, data: DeviceData, device):
+    wp.launch(kernel = dev_solve_spheres_collisions, 
+                inputs = [data], dim=num_spheres, device=device)
 
             
 

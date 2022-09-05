@@ -10,39 +10,7 @@ import math
 import warp as wp
 
 from pxr import Usd, UsdGeom, Gf, Sdf
-
-
-@wp.kernel
-def solve_collisions(
-        dt: float,
-        mesh_id: wp.uint64,
-        pos_array: wp.array(dtype=wp.vec3),
-        vel_array: wp.array(dtype=wp.vec3),
-        mass_array: wp.array(dtype=float)),
-        radius_array: wp.array(dtype=float)):
-    
-    bounds_lower = wp.vec3(
-        wp.min(wp.min(p0[0], p1[0]), p2[0]) - boundary,
-        wp.min(wp.min(p0[1], p1[1]), p2[1]) - boundary,
-        wp.min(wp.min(p0[2], p1[2]), p2[2]) - boundary)
-
-    bounds_upper = wp.vec3(
-        wp.max(wp.max(p0[0], p1[0]), p2[0]) + boundary,
-        wp.max(wp.max(p0[1], p1[1]), p2[1]) + boundary,
-        wp.max(wp.max(p0[2], p1[2]), p2[2]) + boundary)
-
-
-
-    att_nr = wp.tid()
-
-    first_param = att_nr * ATTACHMENT_PARAMS_SIZE
-    if attachment.params[first_param + ATTACHMENT_ENABLED] == 0.0:
-        return
-
-    type = attachment.type[att_nr]
-    particle_nr = attachment.particle_nr[att_nr]
-    if particle_nr < 0:
-        return
+from gpu import *
 
 
 class Sim():
@@ -51,14 +19,16 @@ class Sim():
         self.stage = stage
         self.device = 'cuda'
         self.controls = controls
-        self.gravity = wp.vec3(0.0, 0.0, -self.controls.gravity)
         self.collision_mesh = None
         self.spheres = []
 
-        self.pos_array = None
-        self.gpu_pos_array = None
-        self.vel_array = None
-        self.gpu_vel_array = None
+        self.dev_data = DeviceData
+        self.host_pos = None
+
+        self.time_step = 1.0 / 30.0
+        self.num_substeps = 5
+        self.gravity = wp.vec3(0.0, 0.0, -self.controls.gravity)
+
 
     class Sphere():
 
@@ -66,7 +36,6 @@ class Sim():
             self.xform_op = None
             self.radius = 0.0
             self.pos = wp.vec3(0.0, 0.0, 0.0)
-            self.vel = wp.vec3(0.0, 0.0, 0.0)
 
             if prim.GetTypeName() == "Sphere":
                 sphere = UsdGeom.Sphere(prim)
@@ -96,32 +65,28 @@ class Sim():
         # collect all sphere shapes
 
         self.spheres = []
+        spheres_pos = []
+        spheres_radius = []
+        spheres_mass = []
 
         for prim in self.stage.Traverse():
             if prim.GetTypeName() == "Sphere":
-                self.spheres.append(self.Sphere(prim))
+                sphere = self.Sphere(prim)
+                self.spheres.append(sphere)
+                spheres_pos.append(sphere.pos)
+                r = sphere.radius
+                spheres_radius.append(r)
+                spheres_mass.append(4.0 * math.pi / 3.0 * r*r*r)
 
         num_spheres = len(self.spheres)
-        if num_spheres > 0:
-            self.pos_array = np.zeros(num_spheres, dtype = wp.vec3)
-            self.vel_array = np.zeros(num_spheres, dtype = wp.vec3)
 
-            for i in range(num_spheres):
-                self.pos_array[i] = self.spheres[i].pos
-
-            self.gpu_pos_array = wp.zeros(shape=(num_spheres,1), dtype = wp.vec3)
-            self.gpu_vel_array = wp.zeros(shape=(num_spheres,1), dtype = wp.vec3)
-            wp.copy(self.gpu_pos_array, self.pos_array)
-            wp.copy(self.gpu_vel_array, self.vel_array)
-
-
-        # create one big triangle mesh from all meshes in the scene
-
-        prim_cache = UsdGeom.XformCache()
-        prim_cache.SetTime(0.0)
+        # create on big triangle mesh for all  meshes in the scene
 
         tri_ids = []
         verts = []
+
+        prim_cache = UsdGeom.XformCache()
+        prim_cache.SetTime(0.0)
 
         for prim in self.stage.Traverse():
 
@@ -146,30 +111,53 @@ class Sim():
                         tri_ids.append(face_ids[first_id + i])
                         tri_ids.append(face_ids[first_id + i + 1])
 
+
+        # create device buffers
+
         if len(verts) > 0:
+            self.dev_data.spheres_pos = wp.array(spheres_pos, dtype=wp.vec3, device=self.device)
+            self.dev_data.spheres_prev_pos = wp.array(verts, dtype=wp.vec3, device=self.device)
+            self.dev_data.spheres_prev_pos = wp.zeros(shape=(num_spheres), dtype=wp.vec3, device=self.device)
+            self.dev_data.spheres_vel: wp.zeros(shape=(num_spheres), dtype=wp.vec3, device=self.device)            
+            self.dev_data.spheres_radius: wp.array(spheres_radius, dtype=float)
+            self.dev_data.spheres_mass: wp.array(spheres_mass, dtype=float)
+
             dev_verts = wp.array(verts, dtype = wp.vec3, device=self.device)
-            dev_tri_ids = wp.array(verts, dtype = int, device=self.device)
-            self.collision_mesh = wp.Mesh(dev_verts, dev_tri_ids)
+            dev_tri_ids = wp.array(tri_ids, dtype = int, device=self.device)
+            dev_mesh = wp.Mesh(dev_verts, dev_tri_ids)
+            self.dev_data.mesh_id = dev_mesh.id
 
-
-
-
-
+            self.host_pos = wp.array(spheres_pos, dtype=wp.vec3, device="cpu")
 
 
     def update(self):
 
         if not self.stage:
             return
+            
+        num_spheres = len(self.spheres)    
+        if num_spheres == 0:
+            return
 
-        num_spheres = len(self.spheres)
-    
-        if num_spheres > 0:
+        dt = self.time_step / self.num_substeps
 
-    
-
+        # send positions to gpu
 
         
 
- 
- 
+        # simulate
+
+        for i in range(self.num_substeps):
+
+            integrate_spheres(num_spheres, dt, self.gravity, self.dev_data, self.device)
+            solve_spheres_collisions(num_spheres, self.dev_data)
+            update_spheres(num_spheres, dt, self.dev_data, self.device)
+
+        # read back pos
+
+        wp.copy(self.host_pos, self.dev_data.sphere_pos)
+        np_pos = self.host_pos.numpy()
+
+        for i in range(num_spheres):
+            self.spheres[i].set_position(np_pos[i])
+
