@@ -10,19 +10,22 @@ import os
 import omni.usd
 from omni import ui
 from pxr import Usd
-from .sim import Sim
 from .controls import ControlsWindow
+from .sim import Sim
 
 EXAMPLES_PATH = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../data/scenes"))
 
-
-class OmniPlayExtension(omni.ext.IExt):
+class OmniFunExtension(omni.ext.IExt):
 
     def on_startup(self, ext_id):
+
+        stage = omni.usd.get_context().get_stage()
+        self.sim = Sim(stage)        
         
-        self.controls = ControlsWindow(
-            init_func=self.init_sim,
-            reset_func=self.reset_sim)
+        self.controls = ControlsWindow(self.sim,
+            init_func = self.init_sim, 
+            reset_func = self.reset_sim)
+
         self.controls.create_window(lambda visible: self.set_controls_menu(visible))
         self.controls.show_window()  
 
@@ -34,24 +37,21 @@ class OmniPlayExtension(omni.ext.IExt):
         if editor_menu:
 
             self.controls_menu = editor_menu.add_item(
-                f"Window/Fun/Controls", 
+                f"Window/Fun/ToggleControls", 
                 lambda _, value: self.show_controls(value), 
                 toggle=True, value=False
             )            
 
             self.menu_items.append(editor_menu.add_item(
-                f"Window/Fun/Basics example", 
-                lambda _, value: self.load_example("basics.usd"),
+                f"Window/Fun/ExampleScene", 
+                lambda _, value: self.load_example("example.usd"),
                 toggle=False, value=False
             ))         
 
-        stage = omni.usd.get_context().get_stage()
-        self.sim = Sim(stage, self.controls)
 
         # set callbacks
 
         self.update_event_stream = omni.kit.app.get_app_interface().get_update_event_stream()
-        self.update_event_sub = self.update_event_stream.create_subscription_to_pop(self.on_update)
         self.stage_event_sub = omni.usd.get_context().get_stage_event_stream().create_subscription_to_pop(self.on_event)
 
 
@@ -60,7 +60,24 @@ class OmniPlayExtension(omni.ext.IExt):
         self.menu_items = None
         self.update_event_stream = None
         self.stage_event_sub = None
+        self.reset_sim()
+        self.controls.destroy_window()
+        self.controls = None
+
+
+    def init_sim(self):
+        stage = omni.usd.get_context().get_stage()
+        self.sim = Sim(stage)        
+        self.update_event_sub = self.update_event_stream.create_subscription_to_pop(self.on_update)
+
+
+    def reset_sim(self):
         self.sim = None
+
+
+    def on_update(self):
+        if self.sim:
+            self.sim.on_update()
 
 
     def set_controls_menu(self, visible):
@@ -75,31 +92,13 @@ class OmniPlayExtension(omni.ext.IExt):
             self.controls.hide_window()
 
 
-    def init_sim(self):
-
-        if self.sim:
-            self.sim.init()
-
-
-    def reset_sim(self):
-
-        if self.sim:
-            self.sim.reset()
-        
-
-    def on_update(self, event):
-
-        if self.sim:
-            self.sim.update()
-
-
     def on_event(self, event):
 
         if event.type == int(omni.usd.StageEventType.CLOSED):
-            self.sim = None
+            self.reset_sim()
 
         if event.type == int(omni.usd.StageEventType.OPENED):
-            pass
+            self.init_sim()
 
 
     def load_example(self, scene_name):

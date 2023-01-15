@@ -4,16 +4,19 @@ import omni.usd
 import omni.kit.app
 from pxr import Usd, Sdf
 import time
+from .sim import Sim
 
 class ControlsWindow:
-    def __init__(self, init_func, reset_func):
+    def __init__(self):
         self._window = None
-        self.init_func = init_func
-        self.reset_func = reset_func
+        
+        stage = omni.usd.get_context().get_stage()
+        self.sim = Sim(stage)
         self.paused = True
-        self.gravity = 10.0
-        self.selected_prim = None
         self.init_button = None
+
+        stage = omni.usd.get_context().get_stage()
+        self.sim = Sim(stage)        
         
 
     def __bool__(self):
@@ -30,6 +33,7 @@ class ControlsWindow:
     def show_window(self):
         self._window.visible = True
 
+
     def hide_window(self):
         self._window.visible = False
 
@@ -41,27 +45,30 @@ class ControlsWindow:
             self._window = None
 
 
-    def on_shutdown(self):
-        self.destroy_window()
-
-
-    def set_selected_prim(self, prim):
-        self.selected_prim = prim
+    def init_sim(self):
+        stage = omni.usd.get_context().get_stage()
+        self.sim = Sim(stage)
+        self.init_button.text = "Reset"
         
 
-    def init_pressed(self):
-        if self.init_button.text == "Init":
-            if self.init_func:
-                self.init_func()
-            self.init_button.text = "Reset"
-        else:
-            self.init_button.text = "Init"
-            if self.reset_func:
-                self.reset_func()
+    def reset_sim(self):
+        self.sim = None
+        self.init_button.text = "Init"
 
+
+    def init_pressed(self):
+        if self.sim is not None:
+            self.reset_sim()
+        else:
+            self.init_sim()
+
+
+    def play_pressed(self):
+        pass
+        
 
     def set_parameter(self, param_name, val):
-        if param_name == "Gravity":
+        if param_name == "gravity":
             self.gravity = val
 
 
@@ -73,34 +80,20 @@ class ControlsWindow:
 
         if self._window and self._window.visible:
             with self._window.frame:
+
                 with ui.VStack(spacing=v_spacing, padding=50):
+
                     with ui.HStack(spacing=h_spacing, height=row_height):
+
                         self.init_button = ui.Button("Init", width=100, height=15, margin=10, clicked_fn=self.init_pressed)
+                        self.start_button = ui.Button("Start", width=100, height=15, margin=10, clicked_fn=self.start_pressed)
 
-                    if  self.selected_prim:
-                        prim = self.selected_prim
+                    with ui.HStack(spacing=h_spacing, height=row_height):
 
-                        with ui.HStack(spacing=h_spacing, height=row_height):
-                            ui.Label("Object path", width=100,padding=10)
-                            ui.Label(str(self.selected_prim.GetPath()), width=100)
-                        
-                        with ui.HStack(spacing=h_spacing, height=row_height):
-                            ui.Label("Parameters:")
+                        ui.Label("Gravity", width=ui.Percent(50), height=10, name="Gravity")
+                        slider = ui.FloatSlider(min=0.0,max=10.0, width=ui.Percent(50))                                        
+                        slider.model.add_value_changed_fn(lambda val, param_name="gravity": self.set_parameter(param_name, val.get_value_as_float()))
 
-                        if id > 0:
-
-                            frame = ui.ScrollingFrame()                            
-                            with frame:
-                                with ui.VStack(spacing=v_spacing):
-
-                                    with ui.HStack(spacing=h_spacing, height=row_height):
-                                        ui.Label("Gravity", width=ui.Percent(50), height=10, name="Gravity")
-                                        slider = ui.FloatSlider(min=0.0,max=10.0, width=ui.Percent(50))                                        
-                                        slider.model.add_value_changed_fn(lambda val, param_name="gravity": self.set_parameter(param_name, val.get_value_as_float()))
-
-                    else:
-                        with ui.HStack(spacing=5, height=row_height):
-                            ui.Label("Object path", width=100)
-                            ui.Label("None", width=100)
+ 
 
 
