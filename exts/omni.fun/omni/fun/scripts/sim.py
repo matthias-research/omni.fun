@@ -22,10 +22,14 @@ class SimData:
     sphere_mass: wp.array(dtype=float)
 
     sphere_pos: wp.array(dtype=wp.vec3)
-    sphere_pre_solve_pos: wp.array(dtype=wp.vec3)
     sphere_rot: wp.array(dtype=wp.quat)
     sphere_lin_vel: wp.array(dtype=wp.vec3)
     sphere_ang_vel: wp.array(dtype=wp.vec3)
+
+    sphere_pos_corr: wp.array(dtype=wp.vec3)
+    sphere_lin_corr: wp.array(dtype=wp.vec3)
+    sphere_ang_corr: wp.array(dtype=wp.vec3)
+    sphere_num_corr: wp.array(dtype=int)
 
     sphere_lower_bounds: wp.array(dtype=wp.vec3)
     sphere_upper_bounds: wp.array(dtype=wp.vec3)
@@ -50,8 +54,8 @@ def dev_integrate(
 
     # move state forward in time
 
-    lin_vel += gravity * dt
-    pos += lin_vel * dt
+    lin_vel = lin_vel + gravity * dt
+    pos = pos + lin_vel * dt
     qt = wp.quat(ang_vel[0], ang_vel[1], ang_vel[2], 0.0) * (dt * 0.5)
     rot = wp.normalize(rot + qt * rot)
 
@@ -76,19 +80,17 @@ def dev_handle_sphere_sphere_collisions(
         sim: SimData):
 
     sphere0 = wp.tid()
+    eps = 0.00001
 
     pos0 = sim.sphere_pos[sphere0]
     radius0 = sim.sphere_radius[sphere0]
-    mass0 = sim.sphere_mass[sphere0]
+    m0 = sim.sphere_mass[sphere0]
+    w0 = 1.0 / (m0 + eps)
     vel0 = sim.lin_vel[sphere0]
     ang0 = sim.ang_vel[sphere0]
 
     lower = sim.sphere_lower_bounds[sphere0]
     upper = sim.sphere_upper_bounds[sphere0]
-
-    pos_corr = wp.vec3(0.0, 0.0, 0.0)
-    lin_vel_corr = wp.vec3(0.0, 0.0, 0.0)
-    ang_vel_corr = wp.vec3(0.0, 0.0, 0.0)
 
     query = wp.bvh_query_aabb(sim.scene_sphere_bvh_id, lower, upper)
     sphere1 = int(0)
@@ -96,9 +98,10 @@ def dev_handle_sphere_sphere_collisions(
     while (wp.bvh_query_next(query, sphere1)):
         if sphere1 < sphere0:   # handle each pair only once!
 
-            pos1 = sim.sphere_pre_solve_pos[sphere1]
+            pos1 = sim.sphere_pos[sphere1]
             radius1 = sim.sphere_radius[sphere1]
-            mass1 = sim.sphere_mass[sphere1]
+            m1 = sim.sphere_mass[sphere1]
+            w1 = 1.0 / (m1 + eps)
             vel1 = sim.lin_vel[sphere1]
             ang1 = sim.ang_vel[sphere1]
 
@@ -108,24 +111,33 @@ def dev_handle_sphere_sphere_collisions(
 
             if dist < min_dist:
 
-                pos_corr -= pos_normal / (mass1 + mass0) * (min_dist - dist + 0.0001)
-                pos0 = pos0 - mass0 * pos_corr
-                pos1 = pos1 + mass1 * pos_corr
+                # bounce
+
+                wp.atomic_add(sim.sphere_num_corr, sphere0, 1)
+                wp.atomic_add(sim.sphere_num_corr, sphere1, 1)
+
+                pos_corr = pos_normal / (w0 + w1) * (min_dist - dist + eps)
+                wp.atomic_add(sim.pos_corr, sphere0, -w0 * pos_corr)
+                wp.atomic_add(sim.pos_corr, sphere1, +w1 * pos_corr)
 
                 vn0 = wp.dot(vel0, pos_normal)
                 vn1 = wp.dot(vel1, pos_normal)
 
-                new_vn0 = (mass0 * vn0 + mass1 * vn1 - mass1 * (vn0 - vn1) * restitution) / (mass0 + mass1)
-                new_vn1 = (mass0 * vn0 + mass1 * vn1 - mass0 * (vn1 - vn0) * restitution) / (mass0 + mass1)
+                new_vn0 = (m0 * vn0 + m1 * vn1 - m1 * (vn0 - vn1) * restitution) / (m0 + m1)
+                new_vn1 = (m0 * vn0 + m1 * vn1 - m0 * (vn1 - vn0) * restitution) / (m0 + m1)
                 new_vn0 = wp.min(0.0, new_vn0)
                 new_vn1 = wp.max(0.0, new_vn1)
+                lin_corr0 = pos_normal * (new_vn0 - vn0)
+                lin_corr1 = pos_normal * (new_vn1 - vn1)
 
-                vel0 = vel0 + pos_normal * (new_vn0 - vn0)
-                vel1 = vel1 + pos_normal * (new_vn1 - vn1)
+                wp.atomic_add(sim.sphere_lin_corr, sphere0, lin_corr0)
+                wp.atomic_add(sim.sphere_lin_corr, sphere1, lin_corr1)
+                vel0 = vel0 + lin_corr0
+                vel1 = vel1 + lin_corr1
 
                 # friction
 
-                ang_normal = wp.normalize(ang0 / mass0 + ang1 / mass1)
+                ang_normal = wp.normalize(ang0 * m0 + ang1 * m1)
                 ang_normal = wp.nomralize(ang_normal - pos_normal * wp.dot(pos_normal, ang_normal))
 
                 vt0 = wp.dot(vel0, wp.cross(ang_normal, pos_normal))
@@ -133,16 +145,15 @@ def dev_handle_sphere_sphere_collisions(
                 omega0 = wp.dot(ang0, ang_normal)
                 omega1 = wp.dot(ang1, ang_normal)
 
-                # v0 + (o0 - do/m0) * r0 = v1 + (o1 + do/m1) * r1
+                # v0 + (o0 - do*w0) * r0 = v1 + (o1 + do*w1) * r1
  
-                domega = (vt1 + omega1 * radius1 - vt0 - omega0 * radius0) / (radius1 / mass1 + radius0 / mass0)
-                ang0 = ang_normal * (omega0 - domega / mass0)
-                ang1 = ang_normal * (omega1 + domega / mass1)
-
-
-    sim.sphere_pos[sphere_nr] = p0 + pos_corr
-    sim.sphere_lin_vel[sphere_nr] = v0 + lin_vel_corr
-    sim.sphere_ang_vel[sphere_nr] = o0 + ang_vel_corr
+                domega = (vt1 + omega1 * radius1 - vt0 - omega0 * radius0) / (radius0 * w0 + radius1 * w1)
+                ang_corr0 = ang_normal * (omega0 - domega * w0) - ang0
+                ang_corr1 = ang_normal * (omega1 + domega * w1) - ang1
+                ang0 = ang0 + ang_corr0
+                ang1 = ang1 + ang_corr1
+                wp.atomic_add(sim.sphere_ang_corr, sphere0, ang_corr0)
+                wp.atomic_add(sim.sphere_ang_corr, sphere1, ang_corr1)
 
 
 @wp.kernel
@@ -153,22 +164,18 @@ def dev_handle_sphere_scene_collisions(
 
     sphere_nr = wp.tid()
 
-    p = sim.sphere_pos[sphere_nr]
-    r = sim.sphere_radius[sphere_nr]
+    pos = sim.sphere_pos[sphere_nr]
+    radius = sim.sphere_radius[sphere_nr]
     m = sim.sphere_mass[sphere_nr]
-    v = sim.lin_vel[sphere_nr]
-    o = sim.ang_vel[sphere_nr]
-
-    pos_corr = wp.vec3(0.0, 0.0, 0.0)
-    lin_vel_corr = wp.vec3(0.0, 0.0, 0.0)
-    ang_vel_corr = wp.vec3(0.0, 0.0, 0.0)
+    vel = sim.lin_vel[sphere_nr]
+    ang = sim.ang_vel[sphere_nr]
 
     inside = float(0.0)
     face_nr = int(0)
-    bary_u = float(0.0)
-    bary_v = float(0.0)
+    u = float(0.0)
+    v = float(0.0)
 
-    found = wp.mesh_query_point(sim.scene_mesh_id, p, r, inside, face_nr, bary_u, bary_v)
+    found = wp.mesh_query_point(sim.scene_mesh_id, pos, radius, inside, face_nr, u, v)
 
     if not found:
         return
@@ -180,37 +187,54 @@ def dev_handle_sphere_scene_collisions(
     p0 = sim.mesh_points[id0]
     p1 = sim.mesh_points[id1]
     p2 = sim.mesh_points[id2]
-    closest = p0 + bary_u * (p1 - p0) + bary_v * (p2 - p0)
+    closest = u * p0 + v * p1 + (1.0 - u - v) * p2
 
-    normal = wp.normalize(p - closest)
-    dist = wp.dot(normal, p - closest)
+    pos_normal = wp.normalize(pos - closest)
+    dist = wp.dot(pos_normal, pos - closest)
 
-    if dist >= r:
+    if dist >= radius:
         return
 
-    sim.sphere_pos[sphere_nr] = p - normal * (r - dist)
+    sim.sphere_pos[sphere_nr] = pos - pos_normal * (radius - dist)
 
     v0 = (p0 - sim.mesh_prev_points[id0]) / dt
     v1 = (p1 - sim.mesh_prev_points[id1]) / dt
     v2 = (p2 - sim.mesh_prev_points[id2]) / dt
 
-    v_mesh = v0 + bary_u * (v1 - v0) + bary_v * (v2 - v0)
+    v_mesh = v0 + u * (v1 - v0) + v * (v2 - v0)
+    v_mesh = u * v0 + v * v1 + (1.0 - u - v) * v2
 
-    vn_sphere = wp.dot(sim.sphere_lin_vel[sphere_nr], normal)
-    vn_mesh = wp.dot(v_mesh, normal)
+    vn_sphere = wp.dot(sim.sphere_lin_vel[sphere_nr], pos_normal)
+    vn_mesh = wp.dot(v_mesh, pos_normal)
     new_vn = wp.min(vn_mesh - (vn_sphere - vn_mesh) * restitution, 0.0)
-    sim.sphere_vel[sphere_nr] = v + normal * (new_vn - vn_sphere)
+    sim.sphere_lin_vel[sphere_nr] = v + pos_normal * (new_vn - vn_sphere)
 
     # friction
 
-    surface_v_sphere = v0 + wp.cross(o0, r0 * normal)
-    surface_v1 = v1 + wp.cross(o1, -r1 * normal)
-    surface_corr = (m0 / (m1 + m0)) * (surface_v1 - surface_v0)
-    ang_vel_corr += wp.cross(normal * (1.0 / r0), surface_corr)
+    ang_normal = wp.normalize(ang)
+    ang_normal = wp.nomralize(ang - pos_normal * wp.dot(pos_normal, ang_normal))
 
-    # sim.sphere_pos[sphere_nr] = p0 + pos_corr
-    # sim.sphere_lin_vel[sphere_nr] = v0 + lin_vel_corr
-    # sim.sphere_ang_vel[sphere_nr] = o0 + ang_vel_corr
+    vt = wp.dot(vel, wp.cross(ang_normal, pos_normal))
+    omega = wp.dot(ang, ang_normal)
+
+    # vel + (omega + do) * r = v_mesh
+
+    domega = (vt + omega * radius - v_mesh) / radius
+    ang = ang + ang_normal * (omega - domega) 
+    sim.sphere_ang_vel[sphere_nr] = ang
+
+@wp.kernel
+def dev_apply_corrections(
+        sim: SimData):
+
+    sphere_nr = wp.tid()
+
+    num = sim.sphere_num_corr[sphere_nr]
+    if num > 0:
+        s = 1.0 / float(num)
+        sim.sphere_pos[sphere_nr] += sim.sphere_pos_corr[sphere_nr] * s
+        sim.sphere_lin_vel[sphere_nr] += sim.sphere_lin_corr[sphere_nr] * s
+        sim.sphere_ang_vel[sphere_nr] += sim.sphere_ang_corr[sphere_nr] * s
 
 
 class Sim():
@@ -233,6 +257,7 @@ class Sim():
         self.time_step = 1.0 / 30.0
         self.num_substeps = 5
         self.gravity = wp.vec3(0.0, 0.0, -self.controls.gravity)
+        self.restitution = 0.1
         self.jacobi_scale = 0.25
         self.paused = True
         self.num_spheres = 0
@@ -276,46 +301,38 @@ class Sim():
                     # create a sphere
                     min = np.min(trans_points, axis = 0)
                     max = np.max(trans_points, axis = 0)
-                    center = (min + max) * 0.5
+                    pos = (min + max) * 0.5
                     radius = np.max(max - min) * 0.5
 
+                    sphere_radius.append(radius)
+                    sphere_pos.append(pos)
+                    mass = s * radius * radius * radius
+                    sphere_inv_mass.append(1.0 / mass)
 
-                    
+                else:
 
-                            radius = 0.0
-                            for point in points:
-                                radius = max(radius, mat.TransformDir(point).GetLength())
+                    # create obstacle triangles
 
-                            sphere_radius.append(radius)
-                            sphere_pos.append([*mat.ExtractTranslation()])
-                            mass = s * radius * radius * radius
-                            sphere_inv_mass.append(1.0 / mass)
-                            self.sphere_usd_transforms.append(trans)
+                    mesh_poly_indices = mesh.GetFaceVertexIndicesAttr().Get(0.0)
+                    mesh_face_sizes = mesh.GetFaceVertexCountsAttr().Get(0.0)
+                    mesh_points = np.array(points)
 
-                        else:
+                    first_point = len(scene_points)
 
-                            # create obstacle triangles
+                    for i in range(len(mesh_points)):
+                        scene_points.append(mesh_face_sizes[i])
 
-                            mesh_poly_indices = mesh.GetFaceVertexIndicesAttr().Get(0.0)
-                            mesh_face_sizes = mesh.GetFaceVertexCountsAttr().Get(0.0)
-                            mesh_points = np.array(points)
+                    first_index = 0
 
-                            first_point = len(scene_points)
+                    for i in range(len(mesh_face_sizes)):
+                        face_size = mesh_face_sizes[i]
+                        for j in range(1, face_size-1):
+                            scene_tri_indices.append(first_point + mesh_poly_indices[first_index])
+                            scene_tri_indices.append(first_point + mesh_poly_indices[first_index + j])
+                            scene_tri_indices.append(first_point + mesh_poly_indices[first_index + j + 1])
+                        first_local = first_local + face_size
 
-                            for i in range(len(mesh_points)):
-                                scene_points.append(mesh_face_sizes[i])
-
-                            first_index = 0
-
-                            for i in range(len(mesh_face_sizes)):
-                                face_size = mesh_face_sizes[i]
-                                for j in range(1, face_size-1):
-                                    scene_tri_indices.append(first_point + mesh_poly_indices[first_index])
-                                    scene_tri_indices.append(first_point + mesh_poly_indices[first_index + j])
-                                    scene_tri_indices.append(first_point + mesh_poly_indices[first_index + j + 1])
-                                first_local = first_local + face_size
-
-                        break
+                break
         
         # create scene warp buffers
 
@@ -356,11 +373,28 @@ class Sim():
 
     def simulate(self):
 
-        wp.launch(kernel = self.dev_integrate, 
+        wp.launch(kernel = dev_integrate, 
             inputs = [self.time_step, self.gravity, self.dev_sim_data],
             dim = self.num_spheres, device=self.device)
 
         self.sphere_bvh.refit()
+
+        self.dev_sim_data.sphere_pos_corr.zero_()
+        self.dev_sim_data.sphere_lin_corr.zero_()
+        self.dev_sim_data.sphere_ang_corr.zero_()
+        self.dev_sim_data.sphere_num_corr.zero_()
+
+        wp.launch(kernel = dev_handle_sphere_sphere_collisions, 
+            inputs = [self.restitution, self.dev_sim_data],
+            dim = self.num_spheres, device=self.device)
+
+        wp.launch(kernel = dev_apply_corrections, 
+            inputs = [self.dev_sim_data],
+            dim = self.num_spheres, device=self.device)
+
+        wp.launch(kernel = dev_handle_sphere_scene_collisions, 
+            inputs = [self.time_step, self.restitution, self.dev_sim_data],
+            dim = self.num_spheres, device=self.device)
 
 
     def update_stage(self):
