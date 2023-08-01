@@ -10,7 +10,7 @@ import math
 import warp as wp
 
 from pxr import Usd, UsdGeom, Gf, Sdf
-from .gpu import *
+import usdutils
 
 @wp.struct
 class SimData:
@@ -250,7 +250,10 @@ class Sim():
         self.scene_mesh = None
         self.sphere_bvh = None
 
+        self.sphere_usd_meshes = []
         self.sphere_usd_transforms = []
+        self.object_usd_meshes = []
+        self.object_usd_transforms = []
 
         self.initialized = False
 
@@ -263,64 +266,67 @@ class Sim():
         self.num_spheres = 0
 
 
-    def get_global_transform(self, prim, time):
-        self.prim_cache.SetTime(time)
-
-        m = self.prim_cache.GetLocalToWorldTransform(prim)
-        A = np.array([[m[0][0], m[0][1], m[0][2]], [m[1][0], m[1][1], m[1][2]], [m[2][0], m[2][1], m[2][2]]]) 
-        b = np.array([m[3][0], m[3][1], m[3][2]])
-        return A, b
-
-
     def init_sim(self):
 
         if not self.stage:
             return
 
         scene_points = []
+        scene_point_obj = []
         scene_tri_indices = []
 
         sphere_pos = []
         sphere_radius = []
         sphere_inv_mass = []
+        self.sphere_usd_meshes = []
         self.sphere_usd_transforms = []
 
         s = 4.0 / 3.0 * 3.141592
 
         for prim in self.stage.Traverse():
             if prim.GetTypeName() == "Mesh":
-                self.get_global_transform(prim, 0.0)
-                trans_mat, trans_t = self.get_global_transform(prim, 0.0, True)
+                trans_mat, trans_t = usdutils.get_global_transform(prim, 0.0)
 
                 mesh = UsdGeom.Mesh(prim)
                 name = mesh.GetName()
-                trans_points = mesh.GetPointsAttr().Get(0.0) @ trans_mat + trans_t
+                points = mesh.GetPointsAttr().Get(0.0)
 
                 if name.find("sphere") != 0 or name.find("Sphere") != 0:
 
                     # create a sphere
+                    trans_points = points @ trans_mat
                     min = np.min(trans_points, axis = 0)
                     max = np.max(trans_points, axis = 0)
-                    pos = (min + max) * 0.5
                     radius = np.max(max - min) * 0.5
 
                     sphere_radius.append(radius)
-                    sphere_pos.append(pos)
+                    sphere_pos.append(trans_t)
                     mass = s * radius * radius * radius
                     sphere_inv_mass.append(1.0 / mass)
 
+                    clone = usdutils.clone_prim(self.stage, prim)
+                    self.sphere_usd_meshes.append(UsdGeom.Mesh(clone))
+                    self.sphere_usd_transforms.append(clone.Get)
+ 
                 else:
+
+                    obj_nr = len(self.object_usd_meshes)
+                    self.object_usd_meshes.append(mesh)
+
+                    # create obstacle points
+
+                    first_point = len(scene_points)
+
+                    for i in range(len(mesh_points)):
+                        p = mesh_points[i]
+                        scene_points.append(wp.vec3(*p))
+                        scene_point_obj.append(obj_nr)
 
                     # create obstacle triangles
 
                     mesh_poly_indices = mesh.GetFaceVertexIndicesAttr().Get(0.0)
                     mesh_face_sizes = mesh.GetFaceVertexCountsAttr().Get(0.0)
                     mesh_points = np.array(points)
-
-                    first_point = len(scene_points)
-
-                    for i in range(len(mesh_points)):
-                        scene_points.append(mesh_face_sizes[i])
 
                     first_index = 0
 
@@ -330,9 +336,8 @@ class Sim():
                             scene_tri_indices.append(first_point + mesh_poly_indices[first_index])
                             scene_tri_indices.append(first_point + mesh_poly_indices[first_index + j])
                             scene_tri_indices.append(first_point + mesh_poly_indices[first_index + j + 1])
-                        first_local = first_local + face_size
+                        first_index += face_size
 
-                break
         
         # create scene warp buffers
 
@@ -408,7 +413,7 @@ class Sim():
         for i in range(self.num_spheres):
 
             mat = Gf.Matrix4d(Gf.Rotation(Gf.Quatd(*quat[i])), Gf.Vec3d(*pos[i]))
-            self.sphere_usd_transforms[i] .Set(mat)
+            self.sphere_usd_transforms[i].Set(mat)
 
  
 
