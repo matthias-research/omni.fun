@@ -14,10 +14,6 @@ import usdutils
 
 @wp.struct
 class SimData:
-    mesh_points: wp.array(dtype=wp.vec3)
-    mesh_prev_points: wp.array(dtype=wp.vec3)
-    mesh_tri_ids: wp.array(dtype=int)
-
     sphere_radius: wp.array(dtype=float)
     sphere_mass: wp.array(dtype=float)
 
@@ -33,10 +29,15 @@ class SimData:
 
     sphere_lower_bounds: wp.array(dtype=wp.vec3)
     sphere_upper_bounds: wp.array(dtype=wp.vec3)
+    sphere_bvh_id: wp.uint64
 
-    scene_mesh_id: wp.uint64
-    scene_sphere_bvh_id: wp.uint64
-
+    obj_mesh_id: wp.uint64
+    obj_tri_ids: wp.array(dtype=int)
+    obj_orig_pos: wp.array(dtype=wp.vec3)
+    obj_pos: wp.array(dtype=wp.vec3)
+    obj_prev_pos: wp.array(dtype=wp.vec3)
+    obj_transforms: wp.array(dtype=wp.mat44)
+    obj_pos_transform_nr: wp.array(dtype=int)
 
 @wp.kernel
 def dev_integrate(
@@ -92,7 +93,7 @@ def dev_handle_sphere_sphere_collisions(
     lower = sim.sphere_lower_bounds[sphere0]
     upper = sim.sphere_upper_bounds[sphere0]
 
-    query = wp.bvh_query_aabb(sim.scene_sphere_bvh_id, lower, upper)
+    query = wp.bvh_query_aabb(sim.spheres_bvh_id, lower, upper)
     sphere1 = int(0)
 
     while (wp.bvh_query_next(query, sphere1)):
@@ -157,7 +158,17 @@ def dev_handle_sphere_sphere_collisions(
 
 
 @wp.kernel
-def dev_handle_sphere_scene_collisions(
+def dev_update_obj_pos(sim: SimData):
+
+    id = wp.tid()
+    trans_nr = sim.pos_transform_nr[id]
+    pos = sim.obj_transforms[trans_nr] * sim.orig_pos[id]
+    sim.prev_pos[id] = sim.pos[id]
+    sim.pos[id] = pos
+
+
+@wp.kernel
+def dev_handle_sphere_obj_collisions(
         dt: float,
         restitution: float,
         sim: SimData):
@@ -166,7 +177,6 @@ def dev_handle_sphere_scene_collisions(
 
     pos = sim.sphere_pos[sphere_nr]
     radius = sim.sphere_radius[sphere_nr]
-    m = sim.sphere_mass[sphere_nr]
     vel = sim.lin_vel[sphere_nr]
     ang = sim.ang_vel[sphere_nr]
 
@@ -175,18 +185,18 @@ def dev_handle_sphere_scene_collisions(
     u = float(0.0)
     v = float(0.0)
 
-    found = wp.mesh_query_point(sim.scene_mesh_id, pos, radius, inside, face_nr, u, v)
+    found = wp.mesh_query_point(sim.obj_mesh_id, pos, radius, inside, face_nr, u, v)
 
     if not found:
         return
 
-    id0 = sim.mesh_tri_ids[3 * face_nr]
-    id1 = sim.mesh_tri_ids[3 * face_nr + 1]
-    id2 = sim.mesh_tri_ids[3 * face_nr + 2]
+    id0 = sim.obj_tri_ids[3 * face_nr]
+    id1 = sim.obj_tri_ids[3 * face_nr + 1]
+    id2 = sim.obj_tri_ids[3 * face_nr + 2]
 
-    p0 = sim.mesh_points[id0]
-    p1 = sim.mesh_points[id1]
-    p2 = sim.mesh_points[id2]
+    p0 = sim.obj_pos[id0]
+    p1 = sim.obj_pos[id1]
+    p2 = sim.obj_pos[id2]
     closest = u * p0 + v * p1 + (1.0 - u - v) * p2
 
     pos_normal = wp.normalize(pos - closest)
@@ -223,6 +233,7 @@ def dev_handle_sphere_scene_collisions(
     ang = ang + ang_normal * (omega - domega) 
     sim.sphere_ang_vel[sphere_nr] = ang
 
+
 @wp.kernel
 def dev_apply_corrections(
         sim: SimData):
@@ -247,13 +258,12 @@ class Sim():
 
         self.dev_sim_data = SimData()
         self.host_sim_data = SimData()
-        self.scene_mesh = None
-        self.sphere_bvh = None
+        self.spheres_bvh = None
+        self.obj_mesh = None
 
         self.sphere_usd_meshes = []
-        self.sphere_usd_transforms = []
-        self.object_usd_meshes = []
-        self.object_usd_transforms = []
+        self.obj_usd_prims = []
+        self.obj_usd_transforms = []        
 
         self.initialized = False
 
@@ -271,9 +281,9 @@ class Sim():
         if not self.stage:
             return
 
-        scene_points = []
-        scene_point_obj = []
-        scene_tri_indices = []
+        obj_pos = []
+        obj_pos_transform_nr = []
+        obj_tri_ids = []
 
         sphere_pos = []
         sphere_radius = []
@@ -285,7 +295,6 @@ class Sim():
 
         for prim in self.stage.Traverse():
             if prim.GetTypeName() == "Mesh":
-                trans_mat, trans_t = usdutils.get_global_transform(prim, 0.0)
 
                 mesh = UsdGeom.Mesh(prim)
                 name = mesh.GetName()
@@ -294,6 +303,7 @@ class Sim():
                 if name.find("sphere") != 0 or name.find("Sphere") != 0:
 
                     # create a sphere
+                    trans_mat, trans_t = usdutils.get_global_transform(prim, 0.0, False)
                     trans_points = points @ trans_mat
                     min = np.min(trans_points, axis = 0)
                     max = np.max(trans_points, axis = 0)
@@ -310,17 +320,17 @@ class Sim():
  
                 else:
 
-                    obj_nr = len(self.object_usd_meshes)
-                    self.object_usd_meshes.append(mesh)
+                    obj_nr = len(self.obj_usd_prims)
+                    self.object_usd_prims.append(prim)
 
                     # create obstacle points
 
-                    first_point = len(scene_points)
+                    first_pos = len(obj_pos)
 
                     for i in range(len(mesh_points)):
                         p = mesh_points[i]
-                        scene_points.append(wp.vec3(*p))
-                        scene_point_obj.append(obj_nr)
+                        obj_pos.append(wp.vec3(*p))
+                        obj_pos_transform_nr.append(obj_nr)
 
                     # create obstacle triangles
 
@@ -333,21 +343,26 @@ class Sim():
                     for i in range(len(mesh_face_sizes)):
                         face_size = mesh_face_sizes[i]
                         for j in range(1, face_size-1):
-                            scene_tri_indices.append(first_point + mesh_poly_indices[first_index])
-                            scene_tri_indices.append(first_point + mesh_poly_indices[first_index + j])
-                            scene_tri_indices.append(first_point + mesh_poly_indices[first_index + j + 1])
+                            obj_tri_ids.append(first_pos + mesh_poly_indices[first_index])
+                            obj_tri_ids.append(first_pos + mesh_poly_indices[first_index + j])
+                            obj_tri_ids.append(first_pos + mesh_poly_indices[first_index + j + 1])
                         first_index += face_size
 
         
-        # create scene warp buffers
+        # create objects warp buffers
 
-        if len(scene_points) > 0:
+        if len(obj_pos) > 0:
 
-            self.dev_sim_data.mesh_points = wp.array(scene_points, dtype=wp.vec3, device=self.device)
-            self.dev_sim_data.mesh_prev_points = wp.array(scene_points, dtype=wp.vec3, device=self.device)
-            self.dev_sim_data.mesh_tri_indices = wp.array(scene_tri_indices, dtype=int, device=self.device)
-            self.scene_mesh = wp.Mesh(self.dev_sim_data.mesh_points, self.dev_sim_data.mesh_tri_indices)
-            self.dev_sim_data.scene_mesh_id = self.scene_mesh.id
+            self.dev_sim_data.obj_pos = wp.array(obj_pos, dtype=wp.vec3, device=self.device)
+            self.dev_sim_data.pbj_prev_pos = wp.array(obj_pos, dtype=wp.vec3, device=self.device)
+            self.dev_sim_data.obj_tri_ids = wp.array(obj_tri_ids, dtype=int, device=self.device)
+            self.obj_mesh = wp.Mesh(self.dev_sim_data.obj_pos, self.dev_sim_data.obj_tri_ids)
+            self.dev_sim_data.obj_mesh_id = self.obj_mesh.id
+
+            num_objs = len(self.object_usd_prims)
+            mat = wp.mat44()
+            self.obj_transforms = np.array([mat] * num_objs)
+            self.dev_sim_data.obj_transforms = wp.zeros(shape=(num_objs), dtype=wp.mat44, device=self.device)
 
         # create sphere warp buffers
 
@@ -378,6 +393,21 @@ class Sim():
 
     def simulate(self):
 
+        # update objects
+
+        for i in range(len(self.object_usd_prims)):
+            self.obj_transforms[i] = usdutils.get_global_transform(self.object_usd_prims[i], 0.0, True)
+
+        wp.copy(self.dev_sim_data.obj_transforms, wp.array(self.obj_transforms, dtype=wp.array(wp.mat44), copy=False, device="cpu"))
+
+        wp.launch(kernel = dev_update_obj_pos, 
+            inputs = [self.dev_sim_data],
+            dim = len(self.dev_sim_data.obj_pos), device=self.device)
+        
+        self.obj_mesh.refit()
+        
+        #simulate spheres
+
         wp.launch(kernel = dev_integrate, 
             inputs = [self.time_step, self.gravity, self.dev_sim_data],
             dim = self.num_spheres, device=self.device)
@@ -397,12 +427,11 @@ class Sim():
             inputs = [self.dev_sim_data],
             dim = self.num_spheres, device=self.device)
 
-        wp.launch(kernel = dev_handle_sphere_scene_collisions, 
+        wp.launch(kernel = dev_handle_sphere_obj_collisions, 
             inputs = [self.time_step, self.restitution, self.dev_sim_data],
             dim = self.num_spheres, device=self.device)
 
-
-    def update_stage(self):
+        # update stage
 
         wp.copy(self.host_sim_data.sphere_pos, self.dev_sim_data.sphere_pos)
         wp.copy(self.host_sim_data.sphere_quat, self.dev_sim_data.sphere_quat)
@@ -411,18 +440,12 @@ class Sim():
         quat = self.host_sim_data.numpy()
 
         for i in range(self.num_spheres):
-
-            mat = Gf.Matrix4d(Gf.Rotation(Gf.Quatd(*quat[i])), Gf.Vec3d(*pos[i]))
-            self.sphere_usd_transforms[i].Set(mat)
-
- 
+            usdutils.set_transform(self.sphere_usd_meshes, pos[i], quat[i])
 
 
     def reset(self):
 
-        for sphere in self.spheres:
-            sphere.set_position(sphere.pos)
-
+        usdutils.hide_clones(self.stage)
         self.paused = True
 
 

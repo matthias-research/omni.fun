@@ -5,26 +5,30 @@ import warp as wp
 prim_cache = None
 
 
-def get_global_transform(prim, time):
+def get_global_transform(prim, time, return_mat44):
 
     if prim_cache is None:
         prim_cache = UsdGeom.XformCache()
     prim_cache.SetTime(time)
 
     m = prim_cache.GetLocalToWorldTransform(prim)
-    A = np.array([[m[0][0], m[0][1], m[0][2]], [m[1][0], m[1][1], m[1][2]], [m[2][0], m[2][1], m[2][2]]]) 
-    b = np.array([m[3][0], m[3][1], m[3][2]])
-    return A, b
+    if return_mat44:
+        return wp.mat44(
+            m[0][0], m[1][0], m[2][0], m[3][0],
+            m[0][1], m[1][1], m[2][1], m[3][1],
+            m[0][2], m[1][2], m[2][2], m[3][2],
+            m[0][3], m[1][3], m[2][3], m[3][3])
+    else:
+        A = np.array([[m[0][0], m[0][1], m[0][2]], [m[1][0], m[1][1], m[1][2]], [m[2][0], m[2][1], m[2][2]]]) 
+        b = np.array([m[3][0], m[3][1], m[3][2]])
+        return A, b
 
 
-def set_transform(mesh, pose):
-
-    t = wp.transform_get_translation(pose)
-    q = wp.transform_get_rotation(pose)
+def set_transform(mesh, trans, quat):
 
     usd_mat = Gf.Matrix4d()
-    usd_mat.SetRotateOnly(Gf.Quatd(*q))
-    usd_mat.SetTranslateOnly(Gf.Vec3d(*t))
+    usd_mat.SetRotateOnly(Gf.Quatd(*quat))
+    usd_mat.SetTranslateOnly(Gf.Vec3d(*trans))
 
     xform = UsdGeom.Xform(mesh)
     xform.GetOrderedXformOps()[0].Set(usd_mat)
