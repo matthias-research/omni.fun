@@ -12,6 +12,9 @@ import warp as wp
 from pxr import Usd, UsdGeom, Gf, Sdf
 import usdutils
 
+gravity = -9.81
+paused = False
+
 @wp.struct
 class SimData:
     sphere_radius: wp.array(dtype=float)
@@ -253,7 +256,6 @@ class Sim():
     def __init__(self, stage):
         self.stage = stage
         self.device = 'cuda'
-        self.controls = None
         self.prim_cache = UsdGeom.XformCache()
 
         self.dev_sim_data = SimData()
@@ -269,10 +271,8 @@ class Sim():
 
         self.time_step = 1.0 / 30.0
         self.num_substeps = 5
-        self.gravity = wp.vec3(0.0, 0.0, -self.controls.gravity)
         self.restitution = 0.1
         self.jacobi_scale = 0.25
-        self.paused = True
         self.num_spheres = 0
 
 
@@ -384,7 +384,7 @@ class Sim():
             # zero time step to initialize sphere bounds
 
             wp.launch(kernel = self.dev_integrate, 
-                inputs = [0.0, self.gravity, self.dev_sim_data],
+                inputs = [0.0, wp.vec3(0.0, 0.0, 0.0), self.dev_sim_data],
                 dim = self.num_spheres, device=self.device)
 
             self.sphere_bvh = wp.Bvh(self.dev_sim_data.sphere_lower_bounds, self.dev_sim_data.sphere_upper_bounds)
@@ -392,6 +392,9 @@ class Sim():
 
 
     def simulate(self):
+
+        if paused:
+            return
 
         # update objects
 
@@ -446,7 +449,7 @@ class Sim():
     def reset(self):
 
         usdutils.hide_clones(self.stage)
-        self.paused = True
+        paused = True
 
 
 

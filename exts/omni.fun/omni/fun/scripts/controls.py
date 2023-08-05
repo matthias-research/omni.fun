@@ -3,31 +3,24 @@ import omni.ui
 import omni.usd
 import omni.kit.app
 from pxr import Usd, Sdf
-import time
-from .sim import Sim
+import sim
+
 
 class ControlsWindow:
-    def __init__(self):
+    def __init__(self, init_callback=None, play_callback=None):
         self._window = None
-        
-        stage = omni.usd.get_context().get_stage()
-        self.sim = Sim(stage)
-        self.paused = True
-        self.init_button = None
-
-        stage = omni.usd.get_context().get_stage()
-        self.sim = Sim(stage)        
-        
+        self.buttons = [
+            (None, init_callback, False, "Init", "Reset"), 
+            (None, play_callback, False, "Play", "Pause")]
 
     def __bool__(self):
         return self._window is not None
-
 
     def create_window(self, visibility_changed_fn):
         window_flags = omni.ui.WINDOW_FLAGS_NO_SCROLLBAR
         self._window = omni.ui.Window("Fun Controls", flags=window_flags, width=400, height=400, dockPreference=omni.ui.DockPreference.RIGHT_TOP)
         self._window.set_visibility_changed_fn(visibility_changed_fn)
-        self.build_ui()
+        self.rebuild_ui()
 
 
     def show_window(self):
@@ -42,37 +35,22 @@ class ControlsWindow:
         if self._window:
             self._window.visible = False
             self._window.destroy()
-            self._window = None
+            self._window = None        
 
 
-    def init_sim(self):
-        stage = omni.usd.get_context().get_stage()
-        self.sim = Sim(stage)
-        self.init_button.text = "Reset"
-        
+    def button_pressed(self, button):
+        state = not button[2]
+        button[2] = state
+        button[0].text = button[4] if state else button[3]
+        button[1](state)
 
-    def reset_sim(self):
-        self.sim = None
-        self.init_button.text = "Init"
-
-
-    def init_pressed(self):
-        if self.sim is not None:
-            self.reset_sim()
-        else:
-            self.init_sim()
-
-
-    def play_pressed(self):
-        pass
-        
 
     def set_parameter(self, param_name, val):
         if param_name == "gravity":
-            self.gravity = val
+            sim.gravity = val
 
 
-    def build_ui(self):
+    def rebuild_ui(self):
         ui = omni.ui
         row_height = 20
         v_spacing = 10
@@ -85,8 +63,11 @@ class ControlsWindow:
 
                     with ui.HStack(spacing=h_spacing, height=row_height):
 
-                        self.init_button = ui.Button("Init", width=100, height=15, margin=10, clicked_fn=self.init_pressed)
-                        self.start_button = ui.Button("Start", width=100, height=15, margin=10, clicked_fn=self.start_pressed)
+                        for button in self.play_buttons:
+
+                            button[0] = ui.Button(
+                                button[3], width=100, height=15, margin=10, 
+                                clicked_fn=lambda button=button: self.button_pressed(button))
 
                     with ui.HStack(spacing=h_spacing, height=row_height):
 

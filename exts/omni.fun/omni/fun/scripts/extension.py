@@ -11,7 +11,7 @@ import omni.usd
 from omni import ui
 from pxr import Usd
 from .controls import ControlsWindow
-from .sim import Sim
+import sim
 
 EXAMPLES_PATH = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../data/scenes"))
 
@@ -20,11 +20,11 @@ class OmniFunExtension(omni.ext.IExt):
     def on_startup(self, ext_id):
 
         stage = omni.usd.get_context().get_stage()
-        self.sim = Sim(stage)        
+        self.sim = sim.Sim(stage)        
         
         self.controls = ControlsWindow(self.sim,
-            init_func = self.init_sim, 
-            reset_func = self.reset_sim)
+            init_func=self.init_callback, 
+            play_callback=self.play_callback)
 
         self.controls.create_window(lambda visible: self.set_controls_menu(visible))
         self.controls.show_window()  
@@ -65,19 +65,23 @@ class OmniFunExtension(omni.ext.IExt):
         self.controls = None
 
 
-    def init_sim(self):
-        stage = omni.usd.get_context().get_stage()
-        self.sim = Sim(stage)        
-        self.update_event_sub = self.update_event_stream.create_subscription_to_pop(self.on_update)
+    def init_callback(self, state):
+        if state:
+            stage = omni.usd.get_context().get_stage()
+            self.sim = sim.Sim(stage)        
+            self.update_event_sub = self.update_event_stream.create_subscription_to_pop(self.on_update)
+        else:
+            self.sim.reset()
+            self.sim = None
 
 
-    def reset_sim(self):
-        self.sim = None
+    def play_callback(self, state):
+        sim.paused = not state
 
 
     def on_update(self):
         if self.sim:
-            self.sim.on_update()
+            self.sim.simulate()
 
 
     def set_controls_menu(self, visible):
