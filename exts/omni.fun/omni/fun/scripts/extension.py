@@ -11,7 +11,7 @@ import omni.usd
 from omni import ui
 from pxr import Usd
 from .controls import ControlsWindow
-import sim
+from .sim import Sim
 
 EXAMPLES_PATH = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../data/scenes"))
 
@@ -19,11 +19,14 @@ class OmniFunExtension(omni.ext.IExt):
 
     def on_startup(self, ext_id):
 
+        print("fun on_startup")
+
         stage = omni.usd.get_context().get_stage()
-        self.sim = sim.Sim(stage)        
+        self.sim = Sim(stage)
+        self.sim.init()
         
-        self.controls = ControlsWindow(self.sim,
-            init_func=self.init_callback, 
+        self.controls = ControlsWindow(
+            init_callback=self.init_callback, 
             play_callback=self.play_callback)
 
         self.controls.create_window(lambda visible: self.set_controls_menu(visible))
@@ -57,10 +60,12 @@ class OmniFunExtension(omni.ext.IExt):
 
     def on_shutdown(self):
 
+        print("fun on_shutdown")
         self.menu_items = None
         self.update_event_stream = None
         self.stage_event_sub = None
-        self.reset_sim()
+        if self.sim:
+            self.sim.reset()
         self.controls.destroy_window()
         self.controls = None
 
@@ -68,7 +73,8 @@ class OmniFunExtension(omni.ext.IExt):
     def init_callback(self, state):
         if state:
             stage = omni.usd.get_context().get_stage()
-            self.sim = sim.Sim(stage)        
+            if self.sim:
+                self.sim = Sim(stage)        
             self.update_event_sub = self.update_event_stream.create_subscription_to_pop(self.on_update)
         else:
             self.sim.reset()
@@ -76,7 +82,7 @@ class OmniFunExtension(omni.ext.IExt):
 
 
     def play_callback(self, state):
-        sim.paused = not state
+        self.sim.paused = not state
 
 
     def on_update(self):
@@ -99,10 +105,12 @@ class OmniFunExtension(omni.ext.IExt):
     def on_event(self, event):
 
         if event.type == int(omni.usd.StageEventType.CLOSED):
-            self.reset_sim()
+            if self.sim:
+                self.sim.reset()
 
         if event.type == int(omni.usd.StageEventType.OPENED):
-            self.init_sim()
+            if self.sim:
+                self.sim.init()
 
 
     def load_example(self, scene_name):
@@ -111,7 +119,8 @@ class OmniFunExtension(omni.ext.IExt):
             stage_path = os.path.normpath(os.path.join(EXAMPLES_PATH, scene_name))
             omni.usd.get_context().open_stage(stage_path)
 
-            self.init_sim()
+            if self.sim:
+                self.sim.init()
     
         omni.kit.window.file.prompt_if_unsaved_stage(new_stage)
 

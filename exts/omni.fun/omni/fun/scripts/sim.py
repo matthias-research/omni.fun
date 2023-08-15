@@ -10,7 +10,7 @@ import math
 import warp as wp
 
 from pxr import Usd, UsdGeom, Gf, Sdf
-import usdutils
+from .usdutils import *
 
 gravity = -9.81
 paused = False
@@ -276,7 +276,7 @@ class Sim():
         self.num_spheres = 0
 
 
-    def init_sim(self):
+    def init(self):
 
         if not self.stage:
             return
@@ -293,6 +293,8 @@ class Sim():
 
         s = 4.0 / 3.0 * 3.141592
 
+        print("traversing stage")
+
         for prim in self.stage.Traverse():
             if prim.GetTypeName() == "Mesh":
 
@@ -303,7 +305,7 @@ class Sim():
                 if name.find("sphere") != 0 or name.find("Sphere") != 0:
 
                     # create a sphere
-                    trans_mat, trans_t = usdutils.get_global_transform(prim, 0.0, False)
+                    trans_mat, trans_t = get_global_transform(prim, 0.0, False)
                     trans_points = points @ trans_mat
                     min = np.min(trans_points, axis = 0)
                     max = np.max(trans_points, axis = 0)
@@ -314,7 +316,7 @@ class Sim():
                     mass = s * radius * radius * radius
                     sphere_inv_mass.append(1.0 / mass)
 
-                    clone = usdutils.clone_prim(self.stage, prim)
+                    clone = clone_prim(self.stage, prim)
                     self.sphere_usd_meshes.append(UsdGeom.Mesh(clone))
                     self.sphere_usd_transforms.append(clone.Get)
  
@@ -399,7 +401,7 @@ class Sim():
         # update objects
 
         for i in range(len(self.object_usd_prims)):
-            self.obj_transforms[i] = usdutils.get_global_transform(self.object_usd_prims[i], 0.0, True)
+            self.obj_transforms[i] = get_global_transform(self.object_usd_prims[i], 0.0, True)
 
         wp.copy(self.dev_sim_data.obj_transforms, wp.array(self.obj_transforms, dtype=wp.array(wp.mat44), copy=False, device="cpu"))
 
@@ -443,12 +445,12 @@ class Sim():
         quat = self.host_sim_data.numpy()
 
         for i in range(self.num_spheres):
-            usdutils.set_transform(self.sphere_usd_meshes, pos[i], quat[i])
+            set_transform(self.sphere_usd_meshes, pos[i], quat[i])
 
 
     def reset(self):
 
-        usdutils.hide_clones(self.stage)
+        hide_clones(self.stage)
         paused = True
 
 

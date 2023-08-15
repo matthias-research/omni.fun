@@ -28,9 +28,3 @@ exclude = ["Ogn*Database.py", "*/ogn*"]
 # Main python module this extension provides, it will be publicly available as "import omni.play".
 [[python.module]]
 name = "omni.fun"
-
-# Core language module
-[[python.module]]
-name = "omni.fun"
-path = "."
-public = true

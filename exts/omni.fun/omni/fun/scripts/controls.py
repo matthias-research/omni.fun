@@ -3,15 +3,15 @@ import omni.ui
 import omni.usd
 import omni.kit.app
 from pxr import Usd, Sdf
-import sim
+from .sim import Sim
 
 
 class ControlsWindow:
     def __init__(self, init_callback=None, play_callback=None):
         self._window = None
         self.buttons = [
-            (None, init_callback, False, "Init", "Reset"), 
-            (None, play_callback, False, "Play", "Pause")]
+            [None, init_callback, False, "Init", "Reset"], 
+            [None, play_callback, False, "Play", "Pause"]]
 
     def __bool__(self):
         return self._window is not None
@@ -63,7 +63,7 @@ class ControlsWindow:
 
                     with ui.HStack(spacing=h_spacing, height=row_height):
 
-                        for button in self.play_buttons:
+                        for button in self.buttons:
 
                             button[0] = ui.Button(
                                 button[3], width=100, height=15, margin=10, 
@@ -73,7 +73,8 @@ class ControlsWindow:
 
                         ui.Label("Gravity", width=ui.Percent(50), height=10, name="Gravity")
                         slider = ui.FloatSlider(min=0.0,max=10.0, width=ui.Percent(50))                                        
-                        slider.model.add_value_changed_fn(lambda val, param_name="gravity": self.set_parameter(param_name, val.get_value_as_float()))
+                        slider.model.add_value_changed_fn(
+                            lambda val, param_name="gravity": self.set_parameter(param_name, val.get_value_as_float()))
 
  
 
