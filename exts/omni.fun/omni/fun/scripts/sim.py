@@ -13,7 +13,6 @@ from pxr import Usd, UsdGeom, Gf, Sdf
 from .usdutils import *
 
 gravity = -9.81
-paused = False
 
 @wp.struct
 class SimData:
@@ -254,6 +253,7 @@ def dev_apply_corrections(
 class Sim():
 
     def __init__(self, stage):
+        self.paused = True
         self.stage = stage
         self.device = 'cuda'
         self.prim_cache = UsdGeom.XformCache()
@@ -274,6 +274,7 @@ class Sim():
         self.restitution = 0.1
         self.jacobi_scale = 0.25
         self.num_spheres = 0
+        self.frame_nr = 0
 
 
     def init(self):
@@ -394,9 +395,13 @@ class Sim():
 
 
     def simulate(self):
-
-        if paused:
+    
+        if self.paused:
             return
+
+        self.frame_nr += 1
+        print("simulating", self.frame_nr)
+        return
 
         # update objects
 
@@ -451,7 +456,7 @@ class Sim():
     def reset(self):
 
         hide_clones(self.stage)
-        paused = True
+        self.paused = True
 
 
 

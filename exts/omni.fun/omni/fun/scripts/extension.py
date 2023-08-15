@@ -21,36 +21,31 @@ class OmniFunExtension(omni.ext.IExt):
 
         print("fun on_startup")
 
+        setattr(self, "controls", None)
+        setattr(self, "sim", None)
+
         stage = omni.usd.get_context().get_stage()
         self.sim = Sim(stage)
         self.sim.init()
         
-        self.controls = ControlsWindow(
-            init_callback=self.init_callback, 
-            play_callback=self.play_callback)
-
-        self.controls.create_window(lambda visible: self.set_controls_menu(visible))
-        self.controls.show_window()  
-
-        print("controls created") 
-
         editor_menu = omni.kit.ui.get_editor_menu()
         self.menu_items = []
 
         if editor_menu:
 
             self.controls_menu = editor_menu.add_item(
-                f"Window/Fun/ToggleControls", 
+                f"Window/Fun/Controls", 
                 lambda _, value: self.show_controls(value), 
                 toggle=True, value=False
             )            
 
             self.menu_items.append(editor_menu.add_item(
-                f"Window/Fun/ExampleScene", 
-                lambda _, value: self.load_example("example.usd"),
+                f"Window/Fun/SimpleScene", 
+                lambda _, value: self.load_example("simple.usd"),
                 toggle=False, value=False
-            ))         
+            ))
 
+        # self.show_controls(True)
 
         # set callbacks
 
@@ -66,8 +61,7 @@ class OmniFunExtension(omni.ext.IExt):
         self.stage_event_sub = None
         if self.sim:
             self.sim.reset()
-        self.controls.destroy_window()
-        self.controls = None
+        self.show_controls(False)
 
 
     def init_callback(self, state):
@@ -77,15 +71,17 @@ class OmniFunExtension(omni.ext.IExt):
                 self.sim = Sim(stage)        
             self.update_event_sub = self.update_event_stream.create_subscription_to_pop(self.on_update)
         else:
-            self.sim.reset()
+            if self.sim:
+                self.sim.reset()
             self.sim = None
 
 
     def play_callback(self, state):
-        self.sim.paused = not state
+        if self.sim:
+            self.sim.paused = not state
 
 
-    def on_update(self):
+    def on_update(self, dt):
         if self.sim:
             self.sim.simulate()
 
@@ -95,11 +91,20 @@ class OmniFunExtension(omni.ext.IExt):
 
 
     def show_controls(self, is_visible):
-        print("show")
         if is_visible: 
-            self.controls.show_window()
+            if not hasattr(self, "controls"):
+                setattr(self, "controls", None)
+            if self.controls is None:
+                self.controls = ControlsWindow(
+                    init_callback=self.init_callback, 
+                    play_callback=self.play_callback)
+                self.controls.create_window(lambda visible: self.set_controls_menu(visible))
+                self.controls.show_window()
+            else:
+                self.controls.show_window()
         elif self.controls:
-            self.controls.hide_window()
+            self.controls.destroy_window()
+            self.controls = None
 
 
     def on_event(self, event):

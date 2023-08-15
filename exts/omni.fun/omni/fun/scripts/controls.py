@@ -3,7 +3,7 @@ import omni.ui
 import omni.usd
 import omni.kit.app
 from pxr import Usd, Sdf
-from .sim import Sim
+from .sim import gravity
 
 
 class ControlsWindow:
@@ -47,7 +47,7 @@ class ControlsWindow:
 
     def set_parameter(self, param_name, val):
         if param_name == "gravity":
-            sim.gravity = val
+            gravity = val
 
 
     def rebuild_ui(self):
